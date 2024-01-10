@@ -1,28 +1,27 @@
+import math
+
 import torch
 import numpy as np
-
 from sklearn.datasets import make_blobs
 import matplotlib.pyplot as plt
-from sklearn.preprocessing import MinMaxScaler, StandardScaler
 
 
-def random_binary_mask(N, D, zero_ratio=0.9):
-    masks = torch.ones(N, D)
+def random_binary_mask(
+    size, device, type_mask="INPUT", zero_ratio=0.9, mean=0, std=1e-2
+):
+    if type_mask == "INPUT":
+        samples_rnd = torch.rand(size).to(device)
+        masks = torch.ones(size).to(device).float()
+        masks[samples_rnd < 0.9] = 0
+        return masks
 
-    n_zeros = int(D * zero_ratio)
-
-    perm = np.arange(D)
-    idx = np.array([perm] * N)
-    np.apply_along_axis(np.random.shuffle, 1, idx)
-
-    indices = torch.tensor(idx[:, :n_zeros])
-    masks.scatter_(1, indices, 0)
-
-    return masks
+    return torch.normal(mean=mean, std=std, size=size, device=device)
 
 
-def cosine_scheduler(x, max_x, lmbd_init=1):
-    return lmbd_init * 0.5 * (1 + np.cos(np.pi * x / max_x))
+def cosine_scheduler(current_epoch, total_epochs, min_val=0, max_val=10):
+    return min_val + 0.5 * (max_val - min_val) * (
+        1.0 + np.cos(current_epoch * math.pi / total_epochs)
+    )
 
 
 def get_synthetic_dataset():

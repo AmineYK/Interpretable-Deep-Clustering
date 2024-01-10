@@ -1,22 +1,26 @@
 import torch
 import torch.nn as nn
-from utils import random_binary_mask
-import torch.nn.Funtionnal as F
-
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+import torch.nn.functional as F
 
 
-class HardThersholding(nn.Module):
+class HardThresholding(nn.Module):
     def __init__(self, mean=0, std=0.5):
-        super(HardThersholding, self).__init__()
+        super(HardThresholding, self).__init__()
 
         self.mean = mean
         self.std = std
 
     def forward(self, X):
-        noises = torch.normal(
-            mean=self.mean, std=self.std, size=X.size(), requires_grad=False
-        ).to(device)
+        device = X.device
+
+        # Adding noise only in training mode
+        noises = (
+            torch.normal(
+                mean=self.mean, std=self.std, size=X.size(), requires_grad=False
+            ).to(device)
+            * 0.5  # Decrease the noises
+            * self.training
+        )
 
         return torch.maximum(
             torch.tensor([0]).to(device),
@@ -30,23 +34,17 @@ class GatingNN(nn.Module):
 
         self.network = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
+            nn.Tanh(),
             nn.Linear(hidden_dim, input_dim),
+            nn.Tanh(),
         )
 
-        self.hard_thersholding = HardThersholding(mean=0, std=0.5)
+        self.hard_thresholding = HardThresholding(mean=0, std=0.5)
 
     def forward(self, X):
         logits = self.network(X)
-        local_gates = self.hard_thersholding(logits)
+        local_gates = self.hard_thresholding(logits)
         return X * local_gates, local_gates, logits
-
-    def get_local_gates(self, X):
-        """
-        Get the final local gates (interpretability) of the network for a X
-
-        :param X :
-        """
-        return self.hard_thersholding(self.network(X))
 
 
 class AutoEncoder(nn.Module):
@@ -58,83 +56,57 @@ class AutoEncoder(nn.Module):
 
 
 class MLPAutoEncoder(AutoEncoder):
-    def __init__(
-        self,
-        input_dim,
-        input_denoising=True,
-        random_rate_denoising=0.9,
-        latent_denoising=True,
-        sigma_denoising=1,
-    ):
+    def __init__(self, layer_dims):
         super(MLPAutoEncoder, self).__init__()
 
-        self.input_denoising = input_denoising
-        self.latent_denoising = latent_denoising
-        self.random_rate_denoising = random_rate_denoising
-        self.sigma_denoising = sigma_denoising
+        encoder_layers = []
+        decoder_layers = []
 
-        self.input_dim = input_dim
+        previous_layer_dim = layer_dims[0]
+        for dim in layer_dims[1:-1]:
+            encoder_layers.append(nn.Linear(previous_layer_dim, dim))
+            encoder_layers.append(nn.BatchNorm1d(dim))
+            encoder_layers.append(nn.ReLU())
+            previous_layer_dim = dim
 
-        self.encoder = nn.Sequential(
-            nn.Linear(input_dim, 512),
-            nn.BatchNorm1d(512),
-            nn.ReLU(),
-            nn.Linear(512, 512),
-            nn.BatchNorm1d(512),
-            nn.ReLU(),
-            nn.Linear(512, 2048),
-            nn.BatchNorm1d(2048),
-            nn.ReLU(),
-        )
+        encoder_layers.append(nn.Linear(previous_layer_dim, layer_dims[-1]))
+        self.encoder = nn.Sequential(*encoder_layers)
 
-        self.decoder = nn.Sequential(
-            nn.Linear(2048, 512),
-            nn.BatchNorm1d(512),
-            nn.ReLU(),
-            nn.Linear(512, 512),
-            nn.BatchNorm1d(512),
-            nn.ReLU(),
-            nn.Linear(512, input_dim),
-            # TODO : A tester
-            # nn.BatchNorm1d(input_dim),
-            # nn.ReLU(),
-            # nn.Sigmoid(),
-        )
+        reversed_layer_dims = list(reversed(layer_dims))
+        previous_layer_dim = reversed_layer_dims[0]
+        for dim in reversed_layer_dims[1:-1]:
+            decoder_layers.append(nn.Linear(previous_layer_dim, dim))
+            decoder_layers.append(nn.BatchNorm1d(dim))
+            decoder_layers.append(nn.ReLU())
+            previous_layer_dim = dim
+
+        decoder_layers.append(nn.Linear(previous_layer_dim, reversed_layer_dims[-1]))
+        self.decoder = nn.Sequential(*decoder_layers)
 
     def forward(self, X):
-        N, D = X.size()
-
-        if self.input_denoising:
-            X = X * random_binary_mask(N, D, self.random_rate_denoising).to(device)
-
-        hidden_emb = self.encoder(X)
-
-        if self.latent_denoising:
-            hidden_emb = (
-                hidden_emb
-                * torch.normal(mean=1, std=self.sigma_denoising, size=(1,)).item()
-            )
-
-        return self.decoder(hidden_emb), hidden_emb
+        return self.decoder(self.encoder(X))
 
 
 class ClusteringNN(nn.Module):
-    def __init__(self, input_dim, hidden_dim, nb_classes, tau=1e-1):
+    def __init__(self, input_dim, latent_dim, hidden_dim, nb_classes, tau=1e-1):
         super(ClusteringNN, self).__init__()
 
-        self.cluster_head = ClusterHead(nb_classes, hidden_dim, tau)
+        self.cluster_head = ClusterHead(latent_dim, hidden_dim, nb_classes, tau)
         self.aux_classifier = AuxClassifier(input_dim, hidden_dim, nb_classes)
-        self.global_gates = torch.randint(0, 2, (nb_classes, input_dim))
+        self.global_gates = nn.Embedding(nb_classes, input_dim)
+
+        self.hard_thresholding = HardThresholding(mean=0, std=0.5)
 
     def forward(self, X, h):
         # X --> X*Z
         clust_logits = self.cluster_head(h)
         yhat = clust_logits.argmax(dim=1)
 
-        aux_input = X * self.global_gates[yhat]
+        aux_input = X * self.hard_thresholding(self.global_gates(yhat))
         aux_logits = self.aux_classifier(aux_input)
 
-        return clust_logits, aux_logits, self.global_gates
+        # return the logits of the clustering, the logits of the auxiliary classifier and the global gates (mu not thresholded) for the batch
+        return clust_logits, aux_logits, self.global_gates(yhat)
 
 
 class AuxClassifier(nn.Module):
@@ -142,7 +114,9 @@ class AuxClassifier(nn.Module):
         super(AuxClassifier, self).__init__()
 
         self.network = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim), nn.Linear(hidden_dim, nb_classes)
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, nb_classes),
         )
 
     def forward(self, X):
@@ -150,15 +124,17 @@ class AuxClassifier(nn.Module):
 
 
 class ClusterHead(nn.Module):
-    def __init__(self, nb_classes, hidden_dim, tau=1e-1):
+    def __init__(self, latent_dim, hidden_dim, nb_classes, tau=1e-1):
         super(ClusterHead, self).__init__()
 
         self.tau = tau
         self.network = nn.Sequential(
-            nn.Linear(2048, hidden_dim), nn.Linear(hidden_dim, nb_classes)
+            nn.Linear(latent_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, nb_classes),
         )
 
     def forward(self, X):
         logits = self.network(X)
-
+        logits = F.log_softmax(logits, dim=1)
         return F.gumbel_softmax(logits, tau=self.tau)

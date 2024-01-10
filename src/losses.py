@@ -1,9 +1,9 @@
 import torch
 import torch.nn as nn
-import numpy as np
+import torch.nn.functional as F
+import math
 
 from utils import cosine_scheduler
-from modules import device
 
 
 class Loss(nn.Module):
@@ -19,67 +19,69 @@ class ReconstructionLoss(Loss):
         super(ReconstructionLoss, self).__init__()
 
     def forward(self, y, yhat):
-        return torch.norm(yhat - y, p=1)
+        return F.l1_loss(y, yhat)
 
 
 class GTCRLoss(Loss):
-    def __init__(self):
+    def __init__(self, epsilon=1e-3):
         super(GTCRLoss, self).__init__()
 
-    def forward(self, z, epsilon=1e-3):
-        B = z.size(0)
+        self.epsilon = epsilon
 
-        # Image's case
-        if z.ndim > 2:
-            z = z.view(B, -1)
-
+    def forward(self, z):
         B, D = z.size()
-
-        lmbd = D * (B * epsilon)
-
-        z_1 = z.view(B, D, 1)
-        z_2 = z_1.permute(0, 2, 1)
+        lmbd = D / (B * self.epsilon)
 
         return -torch.mean(
-            torch.logdet(((torch.bmm(z_1, z_2) * lmbd) + torch.eye(D).to(device))) * 0.5
+            torch.logdet(((z.T.matmul(z) * lmbd) + torch.eye(D, device=z.device))) * 0.5
         )
 
 
 class RegLoss(Loss):
     def __init__(self, sigma=0.5):
         super(RegLoss, self).__init__()
-
         self.sigma = sigma
 
     def forward(self, u):
-        return (
-            0.5 - 0.5 * torch.erf(-(u + 0.5) / (np.sqrt(2) * self.sigma))
-        ).sum() / u.size(0)
+        return (0.5 - 0.5 * torch.erf(-(u + 0.5) / (math.sqrt(2) * self.sigma))).mean()
 
 
 class SparseLoss(Loss):
-    def __init__(self, epsilon=1e-3):
+    def __init__(self, epsilon=1e-3, pretrain=True):
         super(SparseLoss, self).__init__()
 
         self.epsilon = epsilon
+        self.pretrain = pretrain
 
-    def forward(self, X, X_hat, z, u, lmbd):
-        recons = ReconstructionLoss()
-        gtcr = GTCRLoss()
-        reg = RegLoss(sigma=0.5)
+    def forward(
+        self,
+        X,
+        X_hat,
+        X_input_noised_hat,
+        X_latent_noised_hat,
+        X_z_hat=None,
+        z=None,
+        mu=None,
+        lmbd=None,
+    ):
+        input_recons = ReconstructionLoss()
+        input_denoising_recons = ReconstructionLoss()
+        latent_denoising_recons = ReconstructionLoss()
 
-        # a = recons(X, X_hat)
-        # b = gtcr(z, self.epsilon)
-        # c = reg(u)
-        # d = c
+        gtcr_reg = 0
+        if not self.pretrain:
+            gate_recons = ReconstructionLoss()
+            gtcr = GTCRLoss(self.epsilon)
+            reg = RegLoss(sigma=0.5)
 
-        # print("GTCR :", b.item(), end=" ")
-        # print("Recons :", a.item(), end=" ")
-        # print("Reg :", d.item(), "(lambda = ", lmbd, "reg_u = ", c.item(), ")")
-        # print("\n==========================================================\n")
-        # return a + b + d
+            gtcr_reg = gtcr_reg + gate_recons(X, X_z_hat) + gtcr(z) + lmbd * reg(mu)
 
-        return recons(X, X_hat) + gtcr(z, self.epsilon) + lmbd * reg(u)
+        return (
+            input_recons(X, X_hat)
+            + input_denoising_recons(X, X_input_noised_hat)
+            + latent_denoising_recons(X, X_latent_noised_hat)
+            + gtcr_reg
+        )
 
 
 class HeadLoss(Loss):
@@ -88,33 +90,42 @@ class HeadLoss(Loss):
         self.nb_classes = nb_classes
 
     def forward(self, h, yhat):
-        loss = 0
-        for k in range(self.nb_classes):
-            h_k = h[torch.where(yhat == k)]
-            B, D = h_k.size()
+        B, D = h.size()
+        h = h.T
+        assign = torch.zeros((self.nb_classes, 1, B), device=h.device)
 
-            h_1 = h_k.view(B, D, 1)
-            h_2 = h_1.permute(0, 2, 1)
+        for indx, label in enumerate(yhat):
+            assign[label, 0, indx] = 1
 
-            loss += (
-                torch.logdet(
-                    (torch.mean(torch.bmm(h_1, h_2), dim=0) * 0.5 + torch.eye(D))
-                )
-                * 0.5
-            ).item()
+        h = h.view((1, D, B))
+        log_det = (
+            torch.logdet(
+                torch.eye(D, device=h.device)
+                + 0.5 * h.mul(assign).matmul(h.transpose(1, 2))
+            )
+            * 0.5
+        )
 
-        return loss
+        return log_det.sum()
 
 
 class ClusterLoss(Loss):
-    def __init__(self):
+    def __init__(self, nb_classes):
         super(ClusterLoss, self).__init__()
 
-    def forward(self, h, yhat, yg, zg, lmbd):
-        head = HeadLoss()
-        ce = nn.functional.cross_entropy()
+        self.nb_classes = nb_classes
+
+    def forward(self, h, yhat, yg, u_zg, lmbd):
+        head = HeadLoss(self.nb_classes)
         reg = RegLoss(sigma=0.5)
+        gtcr = GTCRLoss()
 
         yhat_argmax = yhat.argmax(dim=1)
+        yg_softmax = F.softmax(yg, dim=1)
 
-        return head(h, yhat_argmax) + ce(yhat, yg) + lmbd * reg(zg)
+        return (
+            head(h, yhat_argmax)
+            + gtcr(h)
+            + F.cross_entropy(yhat, yg_softmax)
+            + lmbd * reg(u_zg)
+        )

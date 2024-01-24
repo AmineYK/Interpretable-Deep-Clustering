@@ -93,7 +93,9 @@ class ClusteringNN(nn.Module):
 
         self.cluster_head = ClusterHead(latent_dim, hidden_dim, nb_classes, tau)
         self.aux_classifier = AuxClassifier(input_dim, hidden_dim, nb_classes)
-        self.global_gates = nn.Embedding(nb_classes, input_dim)
+        self.global_gates = nn.Sequential(
+            nn.Embedding(nb_classes, input_dim), nn.Tanh()
+        )
 
         self.hard_thresholding = HardThresholding(mean=0, std=0.5)
 
@@ -102,11 +104,13 @@ class ClusteringNN(nn.Module):
         clust_logits = self.cluster_head(h)
         yhat = clust_logits.argmax(dim=1)
 
-        aux_input = X * self.hard_thresholding(self.global_gates(yhat))
+        u_zg = self.global_gates(yhat)
+
+        aux_input = X * self.hard_thresholding(u_zg)
         aux_logits = self.aux_classifier(aux_input)
 
         # return the logits of the clustering, the logits of the auxiliary classifier and the global gates (mu not thresholded) for the batch
-        return clust_logits, aux_logits, self.global_gates(yhat)
+        return clust_logits, aux_logits, u_zg
 
 
 class AuxClassifier(nn.Module):
@@ -123,6 +127,13 @@ class AuxClassifier(nn.Module):
         return self.network(X)
 
 
+def gumble_softmax(logits, tau):
+    logps = F.log_softmax(logits, dim=-1)
+    gumble = torch.rand_like(logps).log().mul(-1).log().mul(-1)
+    logits = logps + gumble
+    return (logits / tau).softmax(dim=-1)
+
+
 class ClusterHead(nn.Module):
     def __init__(self, latent_dim, hidden_dim, nb_classes, tau=1e-1):
         super(ClusterHead, self).__init__()
@@ -136,5 +147,4 @@ class ClusterHead(nn.Module):
 
     def forward(self, X):
         logits = self.network(X)
-        logits = F.log_softmax(logits, dim=1)
-        return F.gumbel_softmax(logits, tau=self.tau)
+        return gumble_softmax(logits, tau=self.tau)

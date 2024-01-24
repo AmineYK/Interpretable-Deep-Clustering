@@ -12,7 +12,7 @@ def random_binary_mask(
     if type_mask == "INPUT":
         samples_rnd = torch.rand(size).to(device)
         masks = torch.ones(size).to(device).float()
-        masks[samples_rnd < 0.9] = 0
+        masks[samples_rnd < zero_ratio] = 0
         return masks
 
     return torch.normal(mean=mean, std=std, size=size, device=device)

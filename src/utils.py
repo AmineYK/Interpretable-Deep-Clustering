@@ -30,7 +30,7 @@ def get_synthetic_dataset():
     num_informative_features = 3
     num_nuisance_features = 10
     cluster_std = 0.5
-    nuisance_std = 0.1
+    nuisance_std = 2
 
     # Generate isotropic Gaussian blobs with custom cluster centers
     centers = [[0, 1, 1], [0, 1, 5], [4, 0, 4], [4, 5, 4]]

@@ -64,24 +64,27 @@ class SparseLoss(Loss):
         z=None,
         mu=None,
         lmbd=None,
+        local_gates_lmbd=100,
     ):
         input_recons = ReconstructionLoss()
         input_denoising_recons = ReconstructionLoss()
         latent_denoising_recons = ReconstructionLoss()
+        gate_recons = ReconstructionLoss()
 
-        gtcr_reg = 0
-        if not self.pretrain:
-            gate_recons = ReconstructionLoss()
+        if self.pretrain:
+            gtcr_reg = 0
+            X_z_hat = X
+
+        else:
             gtcr = GTCRLoss(self.epsilon)
             reg = RegLoss(sigma=0.5)
 
-            gtcr_reg = (
-                gtcr_reg + gate_recons(X, X_z_hat) + gtcr(z, X.size(0)) + lmbd * reg(mu)
-            )
+            gtcr_reg = gtcr(z, X.size(0)) + lmbd * reg(mu)
 
         return (
             input_recons(X, X_hat)
-            + input_denoising_recons(X, X_input_noised_hat)
+            + local_gates_lmbd * input_denoising_recons(X, X_input_noised_hat)
+            + local_gates_lmbd * gate_recons(X, X_z_hat)
             + latent_denoising_recons(X, X_latent_noised_hat)
             + gtcr_reg
         )
@@ -115,16 +118,17 @@ class ClusterLoss(Loss):
         self.nb_classes = nb_classes
         self.pretrain = pretrain
 
-    def forward(self, h, yhat, yg, u_zg, lmbd, i):
+    def forward(self, h, yhat, yg, u_zg, lmbd, gamma):
         head = HeadLoss(self.nb_classes)
         reg = RegLoss(sigma=0.5)
         gtcr = GTCRLoss()
 
         yhat_argmax = yhat.argmax(dim=1)
 
+        h = F.normalize(h)
         if self.pretrain:
-            return head(h, yhat) + gtcr(h, self.nb_classes)
+            return gamma * head(h, yhat) + gtcr(h, self.nb_classes)
 
-        return head(h, yhat) + gtcr(h, self.nb_classes), lmbd * reg(
+        return gamma * head(h, yhat) + gtcr(h, self.nb_classes), lmbd * reg(
             u_zg
         ) + F.cross_entropy(yg, yhat_argmax)

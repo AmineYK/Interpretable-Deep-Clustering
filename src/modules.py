@@ -3,6 +3,14 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+def init_weights_normal(m):
+    if isinstance(m, torch.nn.Linear):
+        torch.nn.init.normal_(m.weight, std=0.001)
+
+        if "bias" in vars(m).keys():
+            m.bias.data.fill_(0.0)
+
+
 class HardThresholding(nn.Module):
     def __init__(self, mean=0, std=0.5):
         super(HardThresholding, self).__init__()
@@ -41,21 +49,15 @@ class GatingNN(nn.Module):
 
         self.hard_thresholding = HardThresholding(mean=0, std=0.5)
 
+        self.network.apply(init_weights_normal)
+
     def forward(self, X):
         logits = self.network(X)
         local_gates = self.hard_thresholding(logits)
         return X * local_gates, local_gates, logits
 
 
-class AutoEncoder(nn.Module):
-    def __init__(self):
-        super(AutoEncoder, self).__init__()
-
-    def forward(self, X):
-        raise NotImplementedError("TODO : ")
-
-
-class MLPAutoEncoder(AutoEncoder):
+class MLPAutoEncoder(nn.Module):
     def __init__(self, layer_dims):
         super(MLPAutoEncoder, self).__init__()
 
@@ -83,6 +85,9 @@ class MLPAutoEncoder(AutoEncoder):
         decoder_layers.append(nn.Linear(previous_layer_dim, reversed_layer_dims[-1]))
         self.decoder = nn.Sequential(*decoder_layers)
 
+        self.encoder.apply(init_weights_normal)
+        self.decoder.apply(init_weights_normal)
+
     def forward(self, X):
         return self.decoder(self.encoder(X))
 
@@ -93,9 +98,11 @@ class ClusteringNN(nn.Module):
 
         self.cluster_head = ClusterHead(latent_dim, hidden_dim, nb_classes, tau)
         self.aux_classifier = AuxClassifier(input_dim, hidden_dim, nb_classes)
-        self.global_gates = nn.Sequential(
-            nn.Embedding(nb_classes, input_dim), nn.Tanh()
-        )
+
+        embedding = nn.Embedding(nb_classes, input_dim)
+        torch.nn.init.normal_(embedding.weight, std=0.01)
+
+        self.global_gates = nn.Sequential(embedding, nn.Tanh())
 
         self.hard_thresholding = HardThresholding(mean=0, std=0.5)
 
@@ -123,6 +130,8 @@ class AuxClassifier(nn.Module):
             nn.Linear(hidden_dim, nb_classes),
         )
 
+        self.network.apply(init_weights_normal)
+
     def forward(self, X):
         return self.network(X)
 
@@ -145,6 +154,12 @@ class ClusterHead(nn.Module):
             nn.Linear(hidden_dim, nb_classes),
         )
 
+        self.network.apply(init_weights_normal)
+
     def forward(self, X):
         logits = self.network(X)
-        return gumble_softmax(logits, tau=self.tau)
+        return F.softmax(logits, dim=-1)
+
+        # Or this ??
+        # return logits
+        # return gumble_softmax(logits, tau=self.tau)

@@ -1,0 +1,20 @@
+0- Copier le dossier IDC vers le VRAC (si pas existant)
+
+scp -r IDC_DOSSIER NUM_ETU@ssh.ufr-info-p6.jussieu.fr:/../../../Vrac
+
+1- Connexion à une machine
+
+ssh -X NUM_ETU@ssh.ufr-info-p6.jussieu.fr
+ssh -X NUM_ETU@ppti-14-302-04.ufr-info-p6.jussieu.fr
+
+2- Déconnexion de la machine
+
+3- Lancer la commande
+
+ssh -L8888:localhost:8888 -L 6006:localhost:6006 ppti-14-302-04
+
+4- Accéder à l'emplacement du dossier avec 'cd'
+
+5- Lancer jupyter notebook
+
+6- Enjoy

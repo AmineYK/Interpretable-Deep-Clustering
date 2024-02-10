@@ -144,7 +144,7 @@ def gumble_softmax(logits, tau):
 
 
 class ClusterHead(nn.Module):
-    def __init__(self, latent_dim, hidden_dim, nb_classes, tau=1e-1):
+    def __init__(self, latent_dim, hidden_dim, nb_classes, tau=100):
         super(ClusterHead, self).__init__()
 
         self.tau = tau
@@ -160,6 +160,24 @@ class ClusterHead(nn.Module):
         logits = self.network(X)
         return F.softmax(logits, dim=-1)
 
-        # Or this ??
-        # return logits
-        # return gumble_softmax(logits, tau=self.tau)
+
+class IDC(nn.Module):
+    def __init__(
+        self,
+        data_input_dim,
+        ae_layer_dims,
+        gnn_hidden_dim,
+        cluster_hidden_dim,
+        nb_classes,
+    ):
+        super(IDC, self).__init__()
+
+        self.nb_classes = nb_classes
+        self.ae = MLPAutoEncoder(ae_layer_dims)
+        self.gnn = GatingNN(data_input_dim, gnn_hidden_dim)
+
+        # Dimension of latent space H
+        ae_latent_dim = ae_layer_dims[-1]
+        self.clusterNN = ClusteringNN(
+            data_input_dim, ae_latent_dim, cluster_hidden_dim, nb_classes
+        )

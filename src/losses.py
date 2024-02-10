@@ -33,9 +33,12 @@ class GTCRLoss(Loss):
         lmbd = D / (B * self.epsilon)
 
         return (
-            -torch.logdet(((z.T.matmul(z) * lmbd) + torch.eye(D, device=z.device)))
-            * 0.5
-        ) / scale_factor
+            -(
+                torch.logdet(((z.T.matmul(z) * lmbd) + torch.eye(D, device=z.device)))
+                * 0.5
+            )
+            / scale_factor
+        )
 
 
 class RegLoss(Loss):
@@ -74,17 +77,15 @@ class SparseLoss(Loss):
         if self.pretrain:
             gtcr_reg = 0
             X_z_hat = X
-
         else:
             gtcr = GTCRLoss(self.epsilon)
             reg = RegLoss(sigma=0.5)
-
             gtcr_reg = gtcr(z, X.size(0)) + lmbd * reg(mu)
 
         return (
             input_recons(X, X_hat)
-            + local_gates_lmbd * input_denoising_recons(X, X_input_noised_hat)
             + local_gates_lmbd * gate_recons(X, X_z_hat)
+            + local_gates_lmbd * input_denoising_recons(X, X_input_noised_hat)
             + latent_denoising_recons(X, X_latent_noised_hat)
             + gtcr_reg
         )
@@ -103,7 +104,7 @@ class HeadLoss(Loss):
 
         assign = yhat.T.reshape((self.nb_classes, 1, -1))
         intense_clust = assign.sum(2) + 1e-8
-        scale = (D / (intense_clust * 1e-2)).view(self.nb_classes, 1, 1)
+        scale = (D / (intense_clust * 1e-1)).view(self.nb_classes, 1, 1)
         h = h.view((1, D, B))
 
         log_det = torch.logdet(I + scale * h.mul(assign).matmul(h.transpose(1, 2)))
@@ -112,23 +113,23 @@ class HeadLoss(Loss):
 
 
 class ClusterLoss(Loss):
-    def __init__(self, nb_classes, pretrain=True):
+    def __init__(self, nb_classes, epsilon=1e-3, pretrain=True):
         super(ClusterLoss, self).__init__()
 
         self.nb_classes = nb_classes
         self.pretrain = pretrain
+        self.epsilon = epsilon
 
     def forward(self, h, yhat, yg, u_zg, lmbd, gamma):
         head = HeadLoss(self.nb_classes)
         reg = RegLoss(sigma=0.5)
-        gtcr = GTCRLoss()
+        gtcr = GTCRLoss(self.epsilon)
 
         yhat_argmax = yhat.argmax(dim=1)
 
-        h = F.normalize(h)
         if self.pretrain:
             return gamma * head(h, yhat) + gtcr(h, self.nb_classes)
 
-        return gamma * head(h, yhat) + gtcr(h, self.nb_classes), lmbd * reg(
-            u_zg
-        ) + F.cross_entropy(yg, yhat_argmax)
+        return gamma * head(h, yhat) + gtcr(h, self.nb_classes), F.cross_entropy(
+            yg, yhat_argmax
+        ) + lmbd * reg(u_zg)

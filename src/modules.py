@@ -24,16 +24,17 @@ class HardThresholding(nn.Module):
         # Adding noise only in training mode
         noises = (
             torch.normal(
-                mean=self.mean, std=self.std, size=X.size(), requires_grad=False
-            ).to(device)
+                mean=self.mean, std=self.std, size=X.size(), requires_grad=False, device=device)
             * 0.5  # Decrease the noises
             * self.training
         )
 
-        return torch.maximum(
-            torch.tensor([0]).to(device),
-            torch.minimum(torch.tensor([1]).to(device), 0.5 + X + noises),
-        )
+        return torch.clamp(X + 0.5 + noises, 0.0, 1.0)
+    
+#     torch.maximum(
+#             torch.tensor([0]).to(device),
+#             torch.minimum(torch.tensor([1]).to(device), 0.5 + X + noises),
+#         )
 
 
 class GatingNN(nn.Module):
@@ -93,10 +94,10 @@ class MLPAutoEncoder(nn.Module):
 
 
 class ClusteringNN(nn.Module):
-    def __init__(self, input_dim, latent_dim, hidden_dim, nb_classes, tau=1e-1):
+    def __init__(self, input_dim, latent_dim, hidden_dim, nb_classes):
         super(ClusteringNN, self).__init__()
 
-        self.cluster_head = ClusterHead(latent_dim, hidden_dim, nb_classes, tau)
+        self.cluster_head = ClusterHead(latent_dim, hidden_dim, nb_classes)
         self.aux_classifier = AuxClassifier(input_dim, hidden_dim, nb_classes)
 
         embedding = nn.Embedding(nb_classes, input_dim)
@@ -136,18 +137,10 @@ class AuxClassifier(nn.Module):
         return self.network(X)
 
 
-def gumble_softmax(logits, tau):
-    logps = F.log_softmax(logits, dim=-1)
-    gumble = torch.rand_like(logps).log().mul(-1).log().mul(-1)
-    logits = logps + gumble
-    return (logits / tau).softmax(dim=-1)
-
-
 class ClusterHead(nn.Module):
-    def __init__(self, latent_dim, hidden_dim, nb_classes, tau=100):
+    def __init__(self, latent_dim, hidden_dim, nb_classes):
         super(ClusterHead, self).__init__()
 
-        self.tau = tau
         self.network = nn.Sequential(
             nn.Linear(latent_dim, hidden_dim),
             nn.ReLU(),
@@ -158,7 +151,7 @@ class ClusterHead(nn.Module):
 
     def forward(self, X):
         logits = self.network(X)
-        return F.softmax(logits, dim=-1)
+        return logits
 
 
 class IDC(nn.Module):

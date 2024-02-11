@@ -10,7 +10,7 @@ from utils import *
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-def idc_trainer(idc, X, ae_gnn_config_train, clust_config_train):
+def idc_trainer(idc, X, ae_gnn_config_train, clust_config_train, stage_two=True):
 
     idc = idc.to(device)
 
@@ -28,7 +28,14 @@ def idc_trainer(idc, X, ae_gnn_config_train, clust_config_train):
 
     ae_sparse_losses = []
     ae_gnn_sparse_losses = []
-
+    
+    stage_one_steps = stage_one_dataset.__len__() // ae_gnn_config_train["batch_size"] * ae_gnn_config_train["epochs"]
+    
+    stage_one_sched = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer=stage_one_optimizer,
+            T_max=stage_one_steps,
+            eta_min=1e-6)
+          
     print("--------------------------------")
     print("Stage One Starting :")
 
@@ -40,7 +47,7 @@ def idc_trainer(idc, X, ae_gnn_config_train, clust_config_train):
             stage_one_criterion.pretrain = False
 
             lmbd = cosine_scheduler(
-                epoch - ae_gnn_config_train["end_pretrain_epoch"],
+                epoch - ae_gnn_config_train["epochs"],
                 ae_gnn_config_train["epochs"]
                 - ae_gnn_config_train["end_pretrain_epoch"],
                 max_val=ae_gnn_config_train["reg_lmbd"],
@@ -79,6 +86,7 @@ def idc_trainer(idc, X, ae_gnn_config_train, clust_config_train):
             stage_one_optimizer.zero_grad()
             sparse_loss.backward()
             stage_one_optimizer.step()
+            stage_one_sched.step()
 
             epoch_sparse_loss += sparse_loss.item()
 
@@ -91,6 +99,19 @@ def idc_trainer(idc, X, ae_gnn_config_train, clust_config_train):
 
     print("Stage One Finishing")
     print("--------------------------------")
+    
+    if not stage_two:
+        return {
+            "stage_one": {
+                "ae_sparse_losses": ae_sparse_losses,
+                "ae_gnn_sparse_losses": ae_gnn_sparse_losses,
+            },
+            "stage_two": {
+                "clust_head_pretrain_losses": [],
+                "clust_head_finetune_losses": [],
+                "aux_losses": [],
+            },
+        }
 
     # Cluster Head + Aux Classifier
     X_Z, _, _ = idc.gnn(X.to(device))
@@ -104,7 +125,7 @@ def idc_trainer(idc, X, ae_gnn_config_train, clust_config_train):
     )
 
     stage_two_criterion = ClusterLoss(
-        idc.nb_classes, pretrain=True, epsilon=ae_gnn_config_train["eps"]
+        idc.nb_classes, pretrain=True, epsilon=ae_gnn_config_train["eps"], tau=clust_config_train["tau"]
     )
 
     cluster_head_optimizer = optim.Adam(
@@ -124,25 +145,19 @@ def idc_trainer(idc, X, ae_gnn_config_train, clust_config_train):
     clust_head_finetune_losses = []
     aux_losses = []
 
+    stage_two_steps = stage_two_dataset.__len__() // clust_config_train["batch_size"] * clust_config_train["epochs"]
+    
+    stage_two_sched = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer=cluster_head_optimizer,
+            T_max=stage_two_steps,
+            eta_min=1e-6)
+    
     print("\n--------------------------------")
     print("Stage Two Starting :")
     for epoch in tqdm(range(clust_config_train["epochs"])):
 
         if epoch > clust_config_train["end_pretrain_epoch"]:
             stage_two_criterion.pretrain = False
-
-            lmbd = cosine_scheduler(
-                epoch - clust_config_train["end_pretrain_epoch"],
-                clust_config_train["epochs"] - clust_config_train["end_pretrain_epoch"],
-                max_val=clust_config_train["global_gates_lmbd"],
-            )
-
-        else:
-            lmbd = cosine_scheduler(
-                epoch,
-                clust_config_train["end_pretrain_epoch"],
-                max_val=clust_config_train["global_gates_lmbd"],
-            )
 
         epoch_loss_head = 0.0
         epoch_loss_aux = 0.0
@@ -159,7 +174,7 @@ def idc_trainer(idc, X, ae_gnn_config_train, clust_config_train):
                     clust_logits,
                     aux_logits,
                     u_zg,
-                    lmbd,
+                    clust_config_train["global_gates_lmbd"],
                     gamma=clust_config_train["gamma"],
                 )
             else:
@@ -168,13 +183,14 @@ def idc_trainer(idc, X, ae_gnn_config_train, clust_config_train):
                     clust_logits,
                     aux_logits,
                     u_zg,
-                    lmbd,
+                    clust_config_train["global_gates_lmbd"],
                     gamma=clust_config_train["gamma"],
                 )
 
             cluster_head_optimizer.zero_grad()
             loss_head.backward(retain_graph=True)
             cluster_head_optimizer.step()
+            stage_two_sched.step()
 
             epoch_loss_head += loss_head.item()
 

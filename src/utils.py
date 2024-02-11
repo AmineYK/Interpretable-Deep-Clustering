@@ -1,11 +1,73 @@
 import math
 
 import torch
+import torch.nn.functional as F
 import numpy as np
 from sklearn.datasets import make_blobs
 import matplotlib.pyplot as plt
 
-from scipy.stats import pearsonr
+from itertools import combinations
+
+def feature_importance_accuracy_drop(idc, X, Z, feature_importances):
+    feature_importances = feature_importances / feature_importances.max()
+
+    h = idc.ae.encoder(X * Z)
+    clust_logits, _, _ = idc.clusterNN(X * Z, h)
+    yhat = clust_logits.argmax(dim=1)
+    
+    feature_indices = torch.argsort(feature_importances, descending=True)
+    
+    performances = []
+    
+    for idx in feature_indices:
+        Z[:, idx] = 0
+
+        h = idc.ae.encoder(X * Z)
+        clust_logits, _, _ = idc.clusterNN(X * Z, h)
+        ypred = clust_logits.argmax(dim=1)
+
+        performance = clustering_accuracy(yhat.cpu().detach().numpy(), ypred.cpu().detach().numpy())
+        performances.append([feature_importances[idx].cpu().detach(), performance])
+
+    return np.array(performances) 
+
+def jaccard_similarity(z1, z2):
+    non_zero_indices_z1 = (z1!=0)
+    non_zero_indices_z2 = (z2!=0)
+    intersection = (non_zero_indices_z1 & non_zero_indices_z2).sum()
+    
+    union = (non_zero_indices_z1 | non_zero_indices_z2).sum()
+    jaccard_sim = intersection / union if union != 0 else 0
+
+    return jaccard_sim
+
+
+def diversity(global_z):
+    K = global_z.size(0)
+    sum_jaccard_similarities = 0
+    for i, j in combinations(range(K), 2):
+        sum_jaccard_similarities += jaccard_similarity(global_z[i], global_z[j])
+    return 1 - sum_jaccard_similarities / (K * (K - 1) / 2)
+
+
+
+def uniqueness(X, Z, epsilon=2):
+    n_samples = X.shape[0]
+    uniqueness_scores = []
+    
+    for i in range(n_samples):
+        for k in range(i+1, n_samples):
+            distance_x = np.linalg.norm(X[i] - X[k])
+            
+            if distance_x <= epsilon:
+                distance_w = np.linalg.norm(Z[i] - Z[k])
+                uniqueness_score = distance_w / distance_x
+                uniqueness_scores.append(uniqueness_score)
+    
+    if len(uniqueness_scores) == 0:
+        return 0
+    
+    return np.min(uniqueness_scores)
 
 
 def clustering_accuracy(labels_true, labels_pred):
@@ -18,34 +80,8 @@ def clustering_accuracy(labels_true, labels_pred):
     return value[r, c].sum() / len(labels_true)
 
 
-def faithfulness(model, X, feature_importances):
-    yhat = model.predict(X)
-
-    feature_indices = torch.argsort(feature_importances)
-    feature_importances = feature_importances[feature_indices]
-
-    accuracies_per_importance = []
-    performances = []
-
-    for idx in feature_indices:
-        X_perturbed = X.copy()
-        X_perturbed[:, idx] = 0
-        y_pred = model.predict(X_perturbed)
-
-        performance = clustering_accuracy(yhat, y_pred)
-        performances.append(performance)
-
-        importance = ...  # TODO
-        accuracies_per_importance.append((importance, performance))
-
-    performance_change = 1 - np.array(performances_after_perturbation)
-    correlation, _ = pearsonr(feature_importances, performance_change)
-
-    return correlation
-
-
 def random_binary_mask(
-    size, device, type_mask="INPUT", zero_ratio=0.9, mean=0, std=1e-2
+    size, device, type_mask="INPUT", zero_ratio=0.9, mean=1, std=1e-2
 ):
     if type_mask == "INPUT":
         samples_rnd = torch.rand(size).to(device)
@@ -60,6 +96,12 @@ def cosine_scheduler(current_epoch, total_epochs, min_val=0, max_val=1):
     return min_val + 0.5 * (max_val - min_val) * (
         1.0 + np.cos(current_epoch * math.pi / total_epochs)
     )
+
+def gumble_softmax(logits, tau):
+    logps = F.log_softmax(logits, dim=-1)
+    gumble = torch.rand_like(logps).log().mul(-1).log().mul(-1)
+    logits = logps + gumble
+    return (logits / tau).softmax(dim=-1)
 
 
 def get_synthetic_dataset():

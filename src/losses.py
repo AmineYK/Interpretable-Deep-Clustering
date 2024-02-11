@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 
-from utils import cosine_scheduler
+from utils import cosine_scheduler, gumble_softmax
 
 
 class Loss(nn.Module):
@@ -31,14 +31,10 @@ class GTCRLoss(Loss):
     def forward(self, z, scale_factor):
         B, D = z.size()
         lmbd = D / (B * self.epsilon)
+        I = torch.eye(D, device=z.device)
 
-        return (
-            -(
-                torch.logdet(((z.T.matmul(z) * lmbd) + torch.eye(D, device=z.device)))
-                * 0.5
-            )
-            / scale_factor
-        )
+        logdet = torch.logdet(I + lmbd * z.T.matmul(z))
+        return - (logdet / 2) / scale_factor
 
 
 class RegLoss(Loss):
@@ -47,8 +43,7 @@ class RegLoss(Loss):
         self.sigma = sigma
 
     def forward(self, u):
-        return (0.5 - 0.5 * torch.erf(-(u + 0.5) / (math.sqrt(2) * self.sigma))).mean()
-
+        return torch.mean(0.5 - 0.5 * torch.erf((-1 / 2 - u) / (self.sigma * math.sqrt(2))))
 
 class SparseLoss(Loss):
     def __init__(self, epsilon=1e-3, pretrain=True):
@@ -111,25 +106,49 @@ class HeadLoss(Loss):
         compress_loss = (intense_clust.squeeze() * log_det / (2 * B)).sum()
         return compress_loss / self.nb_classes
 
+class AuxLoss(Loss):
+    
+    def __init__(self):
+        super(AuxLoss, self).__init__()
+        self.reg = RegLoss(sigma=0.5)
+        
+    def forward(self, yhat, yg, u_zg, lmbd):
+        reg_loss = 0
+        aux_loss = 0
+        
+        for y in yhat.unique():
+            u_zg_c = u_zg[yhat == y]
+            reg_loss = reg_loss + self.reg(u_zg_c)
+            
+            yg_c = yg[yhat == y]
+            aux_loss = aux_loss + F.cross_entropy(yg_c, y.reshape(1).repeat(u_zg_c.size(0)))
+        
+        aux_loss = aux_loss / len(yhat.unique())
+        reg_loss = reg_loss / len(yhat.unique())
+        
+        return aux_loss + lmbd * reg_loss
 
 class ClusterLoss(Loss):
-    def __init__(self, nb_classes, epsilon=1e-3, pretrain=True):
+    def __init__(self, nb_classes, epsilon=1e-3, tau=100, pretrain=True):
         super(ClusterLoss, self).__init__()
 
         self.nb_classes = nb_classes
         self.pretrain = pretrain
         self.epsilon = epsilon
+        self.tau = tau
+        
+        self.head = HeadLoss(self.nb_classes)
+        self.gtcr = GTCRLoss(epsilon)
+        self.aux = AuxLoss()
+        
+    def forward(self, h, clust_logits, yg, u_zg, lmbd, gamma):
 
-    def forward(self, h, yhat, yg, u_zg, lmbd, gamma):
-        head = HeadLoss(self.nb_classes)
-        reg = RegLoss(sigma=0.5)
-        gtcr = GTCRLoss(self.epsilon)
-
-        yhat_argmax = yhat.argmax(dim=1)
-
+        prob = gumble_softmax(clust_logits, self.tau)
+        h = F.normalize(h)
+        
         if self.pretrain:
-            return gamma * head(h, yhat) + gtcr(h, self.nb_classes)
+            return gamma * self.head(h, prob) + self.gtcr(h, self.nb_classes)
+        
+        yhat = clust_logits.argmax(dim=-1)
 
-        return gamma * head(h, yhat) + gtcr(h, self.nb_classes), F.cross_entropy(
-            yg, yhat_argmax
-        ) + lmbd * reg(u_zg)
+        return gamma * self.head(h, prob) + self.gtcr(h, self.nb_classes), self.aux(yhat, yg, u_zg, lmbd)
